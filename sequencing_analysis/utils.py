@@ -6,7 +6,7 @@ import copy
 
 import tqdm
 import matplotlib
-matplotlib.use('Agg')
+#matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 import numpy as np
@@ -50,7 +50,7 @@ def import_fasta(path, pbar = None, sample_id = None):
   return sequences
 
 
-def import_fastq(path, max_reads = None, pbar = None, sample_id = None, max_sequence_length = 50, sequence_pretruncate = 0):
+def import_fastq(path, max_reads = None, pbar = None, sample_id = None, max_sequence_length = None, sequence_pretruncate = 0):
   if max_reads is None:  max_reads = float('inf')
 
   file = open(path)
@@ -92,7 +92,7 @@ def import_fastq(path, max_reads = None, pbar = None, sample_id = None, max_sequ
     pbar.close()
   return sequences
 
-def import_fastq_2way(path_f, path_r, max_reads = None, pbar = None, sample_id = None, max_sequence_length = 50, sequence_pretruncate = 0):
+def import_fastq_2way(path_f, path_r, max_reads = None, pbar = None, sample_id = None, max_sequence_length = None, sequence_pretruncate = 0):
   reads_forward = import_fastq(path_f, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = max_sequence_length, sequence_pretruncate = sequence_pretruncate)
   reads_reverse = import_fastq(path_r, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = max_sequence_length, sequence_pretruncate = sequence_pretruncate)
   
