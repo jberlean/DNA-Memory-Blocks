@@ -1,6 +1,7 @@
 import os, sys
 import math
 import pickle
+import multiprocessing as mp
 
 import numpy as np
 import tqdm
@@ -9,19 +10,58 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+
 import utils
 
-def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max_reads = None, max_hash_defect = 5, min_cluster_abundance = 2e-4, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, sample_id = None, pbar = None):
+def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max_reads = None, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, template_hash_f_start = 23, template_hash_r_start = 24, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12, max_hash_defect = 5, min_cluster_abundance = 2e-4, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, selfalign = True, align_left_marker = None, align_left_position = None, align_right_marker = None, align_right_position = None, sample_id = None, pbar = None):
+  # Same as analyze_fastq() but delays self-alignment of the forward and reverse reads until the sequence
+  # reconstruction phase. Also does not attempt to align to sequence markers (e.g. master primer sequences).
+
   # Load sequencing data
-  reads_all = utils.import_fastq_2way(path_forward, path_reverse, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = None)
+  reads_raw = utils.import_fastq_2way(path_forward, path_reverse, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = None)
+  reads = reads_raw
 
   # Load template data
   templates = utils.import_fasta(path_templates, pbar = pbar, sample_id = sample_id)
 
+  # If selfalign is True, convert each 2-way read to a single-sequence read by aligning the forward and reverse reads.
+  # A fastq_2way flag is set here to indicate to downstream functions whether the reads are 2-way or not.
+  if selfalign:
+    # Align forward and reverse reads with each other
+    reads_selfaligned = [utils.fastq_2way_selfalign(read) for read in tqdm.tqdm(reads)]
+    reads_selfaligned = [r for r in reads_selfaligned if r[1] is not None]
+    reads = reads_selfaligned
+    fastq_2way = False
+  else:
+    reads = reads_raw
+    fastq_2way = True
+
+  # If a left alignment marker (e.g. a master primer sequence) is given, then align on the left 
+  # This operation shifts the sequence so the alignment marker appears at the appropriate position of the sequence
+  if align_left_marker is not None:
+    if fastq_2way:  align_func = utils.fastq_2way_align_to_marker
+    else:  align_func = utils.fastq_align_to_marker
+
+    reads_aligned_left = [align_func(read, align_left_marker, align_left_position, side='left', acc_cutoff=sequencing_accuracy, orient=True) for read in tqdm.tqdm(reads)]
+    reads_aligned_left = [r for r in reads_aligned_left if r[1] is not None]
+    reads = reads_aligned_left
+
+  # If a right alignment marker is given, then align on the right
+  if align_right_marker is not None:
+    if fastq_2way:  align_func = utils.fastq_2way_align_to_marker
+    else:  align_func = utils.fastq_align_to_marker
+    
+    reads_aligned_right = [align_func(read, align_right_marker, align_right_position, side='right', acc_cutoff=sequencing_accuracy, orient=True) for read in tqdm.tqdm(reads)]
+    reads_aligned_right = [r for r in reads_aligned_right if r[1] is not None]
+    reads = reads_aligned_right
+ 
   # Cluster reads based on their hash sequences
-  min_cluster_size = math.ceil(min_cluster_abundance * len(reads_all))
+  min_cluster_size = math.ceil(min_cluster_abundance * len(reads))
   cluster_hashes, cluster_reads = cluster_reads_by_hash(
-      reads_all, 
+      reads, 
+      hash_f_start = hash_f_start, hash_f_length = hash_f_length,
+      hash_r_start = hash_r_start, hash_r_length = hash_r_length,
+      fastq_2way = fastq_2way,
       max_hash_defect = max_hash_defect,
       min_cluster_size = min_cluster_size,
       sample_id = sample_id, 
@@ -29,12 +69,19 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
   )
 
   # Count cluster sizes by UMI
-  cluster_sizes_UMI = calc_cluster_sizes_UMI(reads_all, cluster_reads)
+  cluster_sizes_UMI = calc_cluster_sizes_UMI(
+      reads, 
+      cluster_reads,
+      UMI_f_start = UMI_f_start, UMI_f_length = UMI_f_length,
+      UMI_r_start = UMI_r_start, UMI_r_length = UMI_r_length,
+      fastq_2way = fastq_2way
+  )
 
   # Attempt sequence reconstruction of each cluster
   reconstructions, base_identity_counts, reconstruction_depths = cluster_sequence_reconstruction(
-      reads_all,
+      reads,
       cluster_reads,
+      fastq_2way = fastq_2way,
       sequencing_accuracy = sequencing_accuracy, 
       max_reconstruction_depth = max_reconstruction_depth,
       sample_id = sample_id,
@@ -42,7 +89,15 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
   )
 
   # Attempt to associate each cluster with one of the templates
-  cluster_assignments = assign_clusters_to_templates(cluster_hashes, templates, sample_id = sample_id, pbar = pbar)
+  cluster_assignments = assign_clusters_to_templates(
+      cluster_hashes, 
+      templates, 
+      template_hash_f_start = template_hash_f_start, hash_f_length = hash_f_length,
+      template_hash_r_start = template_hash_r_start, hash_r_length = hash_r_length,
+      max_hash_defect = max_hash_defect,
+      sample_id = sample_id, 
+      pbar = pbar
+  )
   template_counts = [len(cluster_reads[cluster_assignments.index(i)]) if i in cluster_assignments else 0 for i in range(len(templates))]
  
   # Save raw analysis results
@@ -62,25 +117,49 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
     'cluster_base_counts': base_identity_counts,
     'template_counts': template_counts,
     'max_reads': max_reads,
-    'num_reads': len(reads_all),
+    'num_reads': len(reads_raw),
+    'num_reads_selfaligned': len(reads_selfaligned) if selfalign else None,
+    'num_reads_alignleft': len(reads_aligned_left) if align_left_marker is not None else None,
+    'num_reads_alignright': len(reads_aligned_right) if align_right_marker is not None else None,
     'max_hash_defect': max_hash_defect,
     'min_cluster_abundance': min_cluster_abundance,
     'sequencing_accuracy': sequencing_accuracy,
     'max_reconstruction_depth': max_reconstruction_depth,
+    'hash_args': {
+      'hash_f_start': hash_f_start,
+      'hash_f_length': hash_f_length,
+      'hash_r_start': hash_r_start,
+      'hash_r_length': hash_r_length,
+      'template_hash_f_start': template_hash_f_start,
+      'template_hash_r_start': template_hash_r_start
+    },
+    'UMI_args': {
+      'UMI_f_start': UMI_f_start,
+      'UMI_f_length': UMI_f_length,
+      'UMI_r_start': UMI_r_start,
+      'UMI_r_length': UMI_r_length,
+    },
+    'alignment_args': {
+      'selfalign': selfalign,
+      'align_left_marker': align_left_marker,
+      'align_left_position': align_left_position,
+      'align_right_marker': align_right_marker,
+      'align_right_position': align_right_position
+    }
   }
   pickle.dump(output, outpath)
   outpath.close()
 
   # Make plots
   if sample_id is None:
-    plot_title = 'Counts from {} reads'.format(len(reads_all))
+    plot_title = 'Counts from {} reads'.format(len(reads_raw))
   else:
-    plot_title = 'Counts from {} reads (SAMPLE {})'.format(len(reads_all), sample_id)
+    plot_title = 'Counts from {} reads (SAMPLE {})'.format(len(reads_raw), sample_id)
   plot_counts_bar(templates, template_counts, output_prefix, title=plot_title)
 
   return output
 
-def cluster_reads_by_hash(reads, max_hash_defect = 5, min_cluster_size = 3, cluster_refresh_interval = 20000, sample_id = None, pbar = None):
+def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, fastq_2way = True, max_hash_defect = 5, min_cluster_size = 3, cluster_refresh_interval = 20000, sample_id = None, pbar = None):
   # Steps:
   # For each forward/reverse read, do the following:
   #  1) Identify the forward hash, which is located at forward_read[23:47]
@@ -114,12 +193,14 @@ def cluster_reads_by_hash(reads, max_hash_defect = 5, min_cluster_size = 3, clus
   cluster_hash_base_counts = []
   cluster_sequences = []
 
-  hash_subseq_length = 48//(max_hash_defect+1)
+  hash_length = hash_f_length + hash_r_length
+
+  hash_subseq_length = hash_length//(max_hash_defect+1)
   
-  for read_idx, (_, (seq_f, seq_r)) in enumerate(reads):
+  for read_idx, (read_name, read_seq) in enumerate(reads):
     # extract hash; hash_f/hash_r starts at 23/24, but UMIs add 12nts to each end
-    hash_full = read_to_hash(seq_f, seq_r, hash_f_start = 35, hash_r_start = 36)
-    if len(hash_full) != 48:  continue
+    hash_full = read_to_hash(read_seq, hash_f_start = hash_f_start, hash_f_length = hash_f_length, hash_r_start = hash_r_start, hash_r_length = hash_r_length, fastq_2way = fastq_2way)
+    if len(hash_full) != hash_length:  continue
 
     # check if we've observed this hash before, or one with up to 3 mutations
     potential_clusters = set(
@@ -138,8 +219,8 @@ def cluster_reads_by_hash(reads, max_hash_defect = 5, min_cluster_size = 3, clus
       clusters = set([num_clusters])
       cluster_hashes.append(set())
       cluster_reads.append([])
-      cluster_hash_base_counts.append([[0,0,0,0] for _ in range(48)])
-      cluster_sequences.append('N'*48)
+      cluster_hash_base_counts.append([[0,0,0,0] for _ in range(hash_length)])
+      cluster_sequences.append('N'*hash_length)
       num_clusters += 1
 
     # associate each substring of the hash with each matching cluster
@@ -172,7 +253,7 @@ def cluster_reads_by_hash(reads, max_hash_defect = 5, min_cluster_size = 3, clus
 
       # remake/update cluster info
       cluster_reads_new = [[] for _ in range(num_new_clusters)]
-      cluster_hash_base_counts_new = [[[0,0,0,0] for __ in range(48)] for _ in range(num_new_clusters)]
+      cluster_hash_base_counts_new = [[[0,0,0,0] for __ in range(hash_length)] for _ in range(num_new_clusters)]
       for c_idx in new_clusters:
         c_idx_new = new_clusters[c_idx]
         cluster_reads_new[c_idx_new].extend(cluster_reads[c_idx])
@@ -200,13 +281,12 @@ def cluster_reads_by_hash(reads, max_hash_defect = 5, min_cluster_size = 3, clus
   for cluster_idx in range(len(cluster_reads)):
     cluster_hash_seqs.append(''.join(['ATCG'[counts.index(max(counts))] for counts in cluster_hash_base_counts[cluster_idx]]))
 
-
   # with these clusters fixed, assign reads to clusters
   cluster_reads2 = [[] for _ in range(len(cluster_hash_seqs))]
-  for read_idx, (read_name, (seq_f, seq_r)) in enumerate(reads):
+  for read_idx, (read_name, read_seq) in enumerate(reads):
     # extract hash; hash_f/hash_r starts at 23/24, but UMIs add 12nts to each end
-    hash_full = read_to_hash(seq_f, seq_r, hash_f_start = 35, hash_r_start = 36)
-    if len(hash_full) != 48:  continue
+    hash_full = read_to_hash(read_seq, hash_f_start = hash_f_start, hash_f_length = hash_f_length, hash_r_start = hash_r_start, hash_r_length = hash_r_length, fastq_2way = fastq_2way)
+    if len(hash_full) != hash_length:  continue
 
     dists = [utils.hamming_distance(hash_full, h) for h in cluster_hash_seqs]
     min_dist = min(dists)
@@ -227,7 +307,7 @@ def cluster_reads_by_hash(reads, max_hash_defect = 5, min_cluster_size = 3, clus
   else:
     return [],[]
 
-def calc_cluster_sizes_UMI(reads, cluster_read_indices):
+def calc_cluster_sizes_UMI(reads, cluster_read_indices, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12, fastq_2way = True):
   # conflates reads that have UMIs that are different by up to 1 mutation
 
   cluster_sizes_UMI = []
@@ -239,8 +319,8 @@ def calc_cluster_sizes_UMI(reads, cluster_read_indices):
 
     UMI_counts = {}
     for read_idx in read_idxs:
-      _, (seq_f, seq_r) = reads[read_idx]
-      UMI = read_to_UMI(seq_f, seq_r)
+      _, seq = reads[read_idx]
+      UMI = read_to_UMI(seq, UMI_f_start = UMI_f_start, UMI_f_length = UMI_f_length, UMI_r_start = UMI_r_start, UMI_r_length = UMI_r_length, fastq_2way = fastq_2way)
       UMI_counts[UMI] = UMI_counts.get(UMI, 0) + 1
 
     UMIs_sorted,_ = zip(*sorted(UMI_counts.items(), key = lambda x: x[1], reverse=True))
@@ -260,7 +340,7 @@ def calc_cluster_sizes_UMI(reads, cluster_read_indices):
   return cluster_sizes_UMI
 
 
-def cluster_sequence_reconstruction(reads, cluster_read_indices, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, sample_id = None, pbar = None):
+def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = True, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, sample_id = None, pbar = None):
 
   # Steps:
   # For each cluster:
@@ -283,17 +363,19 @@ def cluster_sequence_reconstruction(reads, cluster_read_indices, sequencing_accu
     reconstruction_depth = 0
     base_identity_counts = []
     for read_idx in read_idxs:
-      _, (seq_f, seq_r) = reads[read_idx]
+#      _, read_seq = reads[read_idx]
      
-      # attempt to align the forward and reverse reads
-      # this is done by taking the last 20nts of the reverse read and aligning it with the forward read
-      seq_r_sub = utils.sequence_complement(seq_r[-20:])
-      align_pos, align_score = utils.align_sequences(seq_r_sub, seq_f)
-      if align_score >= len(seq_r_sub)*sequencing_accuracy:
+      if fastq_2way:
+        # attempt to align the forward and reverse reads
+        # this is done by taking the last 20nts of the reverse read and aligning it with the forward read
+        _, seq_full = utils.fastq_2way_selfalign(reads[read_idx], acc_cutoff = sequencing_accuracy, align_s2_length = 20, min_alignment_overlap = 10)
+      else:
+        _, seq_full = reads[read_idx]
+
+      if seq_full is not None:
         # alignment successful
         reconstruction_depth += 1
 
-        seq_full = seq_f + utils.sequence_complement(seq_r)[len(seq_f)-align_pos:]
         if len(base_identity_counts) < len(seq_full):
           base_identity_counts += [(0,0,0,0)]*(len(seq_full) - len(base_identity_counts))
         for i,nt in enumerate(seq_full):
@@ -327,11 +409,15 @@ def cluster_sequence_reconstruction(reads, cluster_read_indices, sequencing_accu
 
   return consensus_sequences, base_identity_counts_all, reconstruction_depths
 
-def assign_clusters_to_templates(cluster_hashes, templates, max_hash_defect = 3, sample_id = None, pbar = None):
+def assign_clusters_to_templates(cluster_hashes, templates, template_hash_f_start = 23, hash_f_length = 24, template_hash_r_start = 24, hash_r_length = 24, max_hash_defect = 3, sample_id = None, pbar = None):
   # Extract hashes for each template:
   template_hashes = []
   for _, template_seq in templates:
-    template_hashes.append(sequence_to_hash(template_seq, hash_f_start = 23, hash_r_start = 24))
+    template_hashes.append(sequence_to_hash(
+        template_seq, 
+        hash_f_start = template_hash_f_start, hash_f_length = hash_f_length,
+        hash_r_start = template_hash_r_start, hash_r_length = hash_r_length,
+    ))
 
   # For each cluster, see if one of the template hashes is included in the cluster's list of hashes
   cluster_assignments = []
@@ -350,10 +436,10 @@ def plot_counts_bar(templates, counts, output_prefix, title = None):
   bar_x = np.arange(len(templates))
   bar_heights = counts
   bar_width = .9
-  bar_tick_labels = [name[:name.index('_')] for name,_ in templates]
+  bar_tick_labels = [name for name,_ in templates]
   ylims = (0, max(counts)*1.02+.01)
 
-  plt.figure()
+  plt.figure(figsize = (.32*len(templates),4.8))
   plt.bar(x = bar_x, height = bar_heights, width = bar_width, data = counts)
   plt.ylabel('Counts')
   plt.xticks(bar_x, bar_tick_labels, rotation='vertical')
@@ -369,27 +455,38 @@ def plot_counts_bar(templates, counts, output_prefix, title = None):
   plt.savefig('{}_counts.pdf'.format(output_prefix), bbox_inches='tight')
 
 
-def read_to_hash(seq_f, seq_r, hash_f_start = 23, hash_f_length = 24, hash_r_start = 24, hash_r_length = 24):
+def read_to_hash(seq, hash_f_start = 23, hash_f_length = 24, hash_r_start = 24, hash_r_length = 24, fastq_2way = True):
   # Forward hash is given by:
   #  seq_f[hash_f_start:hash_f_start+hash_f_length] 
   # Reverse hash is given by:
   #  seq_r[hash_r_start:hash_r_start+hash_r_length]
   # Full hash is:
   #  forward_hash + complement(reverse_hash)
-  hash_f = seq_f[hash_f_start:hash_f_start+hash_f_length]
-  hash_r = seq_r[hash_r_start:hash_r_start+hash_r_length]
-  return hash_f + utils.sequence_complement(hash_r)
+  if fastq_2way:
+    seq_f, seq_r = seq
+    hash_f = seq_f[hash_f_start:hash_f_start+hash_f_length]
+    hash_r = seq_r[hash_r_start:hash_r_start+hash_r_length]
+    return hash_f + utils.sequence_complement(hash_r)
+  else:
+    hash_f = seq[hash_f_start:hash_f_start+hash_f_length]
+    hash_r = seq[len(seq)-hash_r_start-1:len(seq)-hash_r_start-1+hash_r_length]
+    return hash_f + hash_r
 
 def sequence_to_hash(sequence, hash_f_start = 23, hash_f_length = 24, hash_r_start = 24, hash_r_length = 24):
   # Parameters are the same as for read_to_hash
-  seq_r = utils.sequence_complement(sequence)
-  return read_to_hash(sequence, seq_r, hash_f_start, hash_f_length, hash_r_start, hash_r_length)
+  return read_to_hash(sequence, hash_f_start, hash_f_length, hash_r_start, hash_r_length, fastq_2way = False)
 
-def read_to_UMI(seq_f, seq_r, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12):
+def read_to_UMI(seq, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12, fastq_2way = True):
   # Parameters are interpreted as in read_to_hash()
   # but default UMI lengths are 12 for both forward and reverse
-  UMI_f = seq_f[UMI_f_start:UMI_f_start+UMI_f_length]
-  UMI_r = seq_r[UMI_r_start:UMI_r_start+UMI_r_length]
-  return UMI_f + utils.sequence_complement(UMI_r)
+  if fastq_2way:
+    seq_f, seq_r = seq
+    UMI_f = seq_f[UMI_f_start:UMI_f_start+UMI_f_length]
+    UMI_r = seq_r[UMI_r_start:UMI_r_start+UMI_r_length]
+    return UMI_f + utils.sequence_complement(UMI_r)
+  else:
+    UMI_f = seq[UMI_f_start:UMI_f_start+UMI_f_length]
+    UMI_r = seq[len(seq)-UMI_r_start-1:len(seq)-UMI_r_start-1+UMI_r_length]
+    return UMI_f + UMI_r
 
 
