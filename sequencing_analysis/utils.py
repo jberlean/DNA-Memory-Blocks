@@ -4,6 +4,7 @@ import random
 import itertools as it
 import copy
 
+import Levenshtein
 import tqdm
 import matplotlib
 #matplotlib.use('Agg')
@@ -61,8 +62,8 @@ def import_fastq(path, max_reads = None, pbar = None, sample_id = None, max_sequ
   if sample_id is not None:
     pbar_desc = 'SAMPLE {}: '.format(sample_id) + pbar_desc
   if pbar is None:
-#    pbar = tqdm.tqdm(desc=pbar_desc, unit=' reads', dynamic_ncols = True)
-#    close_pbar = True
+    pbar = tqdm.tqdm(desc=pbar_desc, unit=' reads', dynamic_ncols = True)
+    close_pbar = True
     pass
   else:
     pbar.set_description(pbar_desc)
@@ -296,21 +297,8 @@ def align_sequences(sequence, template):
   return best_pos, best_score
 
 def hamming_distance(seq1, seq2):
-  assert(len(seq1) == len(seq2))
-  return sum(a!=b for a,b in zip(seq1,seq2))
+  return Levenshtein.hamming(seq1, seq2)
 
-def levenshtein_distance(seq1, seq2):
-  dists = np.empty((len(seq1)+1, len(seq2)+1))
-  dists[:len(seq1)+1,0] = np.arange(len(seq1)+1)
-  dists[0,:len(seq2)+1] = np.arange(len(seq2)+1)
-  for i in range(len(seq1) + len(seq2) + 1):
-    max_r = min(i-1, len(seq1))
-    min_r = max(1, i - len(seq2))
-    for r in range(min_r, max_r+1):
-      c = i - r
-      diff = 0 if seq1[r-1]==seq2[c-1] else 1
-      dists[r,c] = min(dists[r-1,c]+1, dists[r,c-1]+1, dists[r-1,c-1]+diff)
-
-  return dists[-1,-1]
-
-    
+def levenshtein_distance(seq1, seq2, score_cutoff=None):
+  # Note: the version of Levenshtein that I can get installed doesn't support score_cutoff
+  return Levenshtein.distance(seq1, seq2)

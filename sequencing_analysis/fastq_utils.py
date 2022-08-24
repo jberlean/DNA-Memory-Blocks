@@ -28,8 +28,9 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
   # A fastq_2way flag is set here to indicate to downstream functions whether the reads are 2-way or not.
   if selfalign:
     # Align forward and reverse reads with each other
-    reads_selfaligned = [utils.fastq_2way_selfalign(read) for read in tqdm.tqdm(reads)]
-    reads_selfaligned = [r for r in reads_selfaligned if r[1] is not None]
+    with mp.Pool(20) as p:
+      res_iter = p.imap(utils.fastq_2way_selfalign, reads, chunksize=100)
+      reads_selfaligned = [r for r in tqdm.tqdm(res_iter, total=len(reads), desc='Self-aligning reads') if r[1] is not None]
     reads = reads_selfaligned
     fastq_2way = False
   else:
@@ -42,17 +43,33 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
     if fastq_2way:  align_func = utils.fastq_2way_align_to_marker
     else:  align_func = utils.fastq_align_to_marker
 
-    reads_aligned_left = [align_func(read, align_left_marker, align_left_position, side='left', acc_cutoff=sequencing_accuracy, orient=True) for read in tqdm.tqdm(reads)]
-    reads_aligned_left = [r for r in reads_aligned_left if r[1] is not None]
+    with mp.Pool(20) as p:
+      args_lst = [(align_func, {
+          'read': r, 
+          'marker': align_left_marker, 'position': align_left_position, 
+          'side': 'left', 
+          'acc_cutoff': sequencing_accuracy, 
+          'orient': True
+      }) for r in reads]
+      res_iter = p.imap(_call_func_starstarargs, args_lst, chunksize=100)
+      reads_aligned_left = [r for r in tqdm.tqdm(res_iter, total=len(args_lst), desc='Left-alignment') if r[1] is not None]
     reads = reads_aligned_left
 
   # If a right alignment marker is given, then align on the right
   if align_right_marker is not None:
     if fastq_2way:  align_func = utils.fastq_2way_align_to_marker
     else:  align_func = utils.fastq_align_to_marker
-    
-    reads_aligned_right = [align_func(read, align_right_marker, align_right_position, side='right', acc_cutoff=sequencing_accuracy, orient=True) for read in tqdm.tqdm(reads)]
-    reads_aligned_right = [r for r in reads_aligned_right if r[1] is not None]
+
+    with mp.Pool(20) as p:
+      args_lst = [(align_func, {
+          'read': r,
+          'marker': align_right_marker, 'position': align_right_position,
+          'side': 'right',
+          'acc_cutoff': sequencing_accuracy,
+          'orient': True
+      }) for r in reads]
+      res_iter = p.imap(_call_func_starstarargs, args_lst, chunksize=100)
+      reads_aligned_right = [r for r in tqdm.tqdm(res_iter, total=len(args_lst), desc='Right-alignment') if r[1] is not None]
     reads = reads_aligned_right
  
   # Cluster reads based on their hash sequences
@@ -65,7 +82,7 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
       max_hash_defect = max_hash_defect,
       min_cluster_size = min_cluster_size,
       sample_id = sample_id, 
-      pbar = pbar
+      verbose = True,
   )
 
   # Count cluster sizes by UMI
@@ -85,7 +102,7 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
       sequencing_accuracy = sequencing_accuracy, 
       max_reconstruction_depth = max_reconstruction_depth,
       sample_id = sample_id,
-      pbar = pbar
+      verbose = True
   )
 
   # Attempt to associate each cluster with one of the templates
@@ -159,7 +176,11 @@ def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max
 
   return output
 
-def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, fastq_2way = True, max_hash_defect = 5, min_cluster_size = 3, cluster_refresh_interval = 20000, sample_id = None, pbar = None):
+def _call_func_starstarargs(args):
+  func, kwargs = args
+  return func(**kwargs)
+
+def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, fastq_2way = True, max_hash_defect = 5, min_cluster_size = 3, cluster_refresh_interval = 20000, sample_id = None, verbose = False):
   # Steps:
   # For each forward/reverse read, do the following:
   #  1) Identify the forward hash, which is located at forward_read[23:47]
@@ -186,6 +207,7 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
   #  - a dict mapping hash subsequences to a "cluster index"
   #  - the sets of hash sequences associated with each cluster
   #  - the sets of read indices associated with each cluster
+
   num_clusters = 0
   hash_subseqs_to_cluster = {}
   cluster_hashes = []
@@ -197,7 +219,7 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
 
   hash_subseq_length = hash_length//(max_hash_defect+1)
   
-  for read_idx, (read_name, read_seq) in enumerate(reads):
+  for read_idx, (read_name, read_seq) in enumerate(tqdm.tqdm(reads, desc='Clustering reads', disable=not verbose)):
     # extract hash; hash_f/hash_r starts at 23/24, but UMIs add 12nts to each end
     hash_full = read_to_hash(read_seq, hash_f_start = hash_f_start, hash_f_length = hash_f_length, hash_r_start = hash_r_start, hash_r_length = hash_r_length, fastq_2way = fastq_2way)
     if len(hash_full) != hash_length:  continue
@@ -211,7 +233,7 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
     clusters = set()
     for idx in potential_clusters:
       seq = cluster_sequences[idx]
-      if utils.hamming_distance(seq, hash_full) < max_hash_defect:
+      if utils.levenshtein_distance(seq, hash_full) < max_hash_defect:
         clusters.add(idx)
 
     # no cluster was matched, make a new (blank) cluster
@@ -242,8 +264,8 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
       # remap cluster indices to a single cluster index if the consensus sequences are similar enough
       new_clusters = {}
       num_new_clusters = 0
-      for idx, seq in enumerate(cluster_sequences):
-        matches = [i for i in range(idx) if utils.hamming_distance(cluster_sequences[i],seq) < max_hash_defect]
+      for idx, seq in enumerate(tqdm.tqdm(cluster_sequences, desc='Cluster refresh...', disable=not verbose, leave=False)):
+        matches = [i for i in range(idx) if utils.levenshtein_distance(cluster_sequences[i],seq, score_cutoff=max_hash_defect) < max_hash_defect]
         if len(matches) == 0:
           new_clusters[idx] = num_new_clusters
           num_new_clusters += 1
@@ -274,8 +296,6 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
 
       num_clusters = num_new_clusters
           
-  print("{}: Clustering reads complete.".format(sample_id))
-      
   # calculate consensus hashes for each cluster
   cluster_hash_seqs = []
   for cluster_idx in range(len(cluster_reads)):
@@ -283,15 +303,27 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
 
   # with these clusters fixed, assign reads to clusters
   cluster_reads2 = [[] for _ in range(len(cluster_hash_seqs))]
-  for read_idx, (read_name, read_seq) in enumerate(reads):
-    # extract hash; hash_f/hash_r starts at 23/24, but UMIs add 12nts to each end
-    hash_full = read_to_hash(read_seq, hash_f_start = hash_f_start, hash_f_length = hash_f_length, hash_r_start = hash_r_start, hash_r_length = hash_r_length, fastq_2way = fastq_2way)
-    if len(hash_full) != hash_length:  continue
 
-    dists = [utils.hamming_distance(hash_full, h) for h in cluster_hash_seqs]
-    min_dist = min(dists)
-    if min_dist <= max_hash_defect:
-      cluster_reads2[dists.index(min_dist)].append(read_idx)
+  read_hashes = [read_to_hash(
+      read_seq,
+      hash_f_start = hash_f_start, hash_f_length = hash_f_length, 
+      hash_r_start = hash_r_start, hash_r_length = hash_r_length, 
+      fastq_2way = fastq_2way
+  ) for _,read_seq in reads]
+  with mp.Pool(20) as p:
+    args_lst = [(_find_closest_cluster, {
+        'hash': hash,
+        'cluster_sequences': cluster_hash_seqs,
+        'hash_subseqs_to_cluster': hash_subseqs_to_cluster,
+        'correct_hash_length': hash_length,
+        'max_hash_defect': max_hash_defect,
+        'hash_subseq_length': hash_subseq_length
+    }) for hash in read_hashes]
+    res_iter = p.imap(_call_func_starstarargs, args_lst, chunksize=100)
+    for read_idx, res in enumerate(tqdm.tqdm(res_iter, total=len(args_lst), desc='Final cluster assignment', disable=not verbose)):
+      cluster_idx, cluster_dist = res
+      if cluster_dist is not None:
+        cluster_reads2[cluster_idx].append(read_idx)
 
   # filter clusters that are too small
   cluster_hash_seqs_filt, cluster_reads_filt = [],[]
@@ -300,12 +332,27 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
       cluster_hash_seqs_filt.append(hash_seq)
       cluster_reads_filt.append(read_idxs)
   
-  print("{}: Assignment of reads to clusters complete.".format(sample_id))
- 
   if len(cluster_hash_seqs_filt) > 0:
     return zip(*sorted(zip(cluster_hash_seqs_filt, cluster_reads_filt), key=lambda x: len(x[1]), reverse=True))
   else:
     return [],[]
+
+def _find_closest_cluster(hash, cluster_sequences, hash_subseqs_to_cluster, correct_hash_length, max_hash_defect, hash_subseq_length):
+    # get potential clusters that match below the max_hash_defect
+    potential_clusters = list(set(
+        idx
+        for i in range(max_hash_defect+1)
+        for idx in hash_subseqs_to_cluster.get(hash[hash_subseq_length*i:hash_subseq_length*(i+1)], [])
+    ))
+    if len(potential_clusters) == 0:  return None, None
+
+    # choose the closest cluster
+    dists = [utils.levenshtein_distance(hash, cluster_sequences[cluster_idx]) for cluster_idx in potential_clusters]
+    argmin_dists = np.argmin(dists)
+    if dists[argmin_dists] <= max_hash_defect:
+      return potential_clusters[argmin_dists], dists[argmin_dists]
+    else:
+      return None, None
 
 def calc_cluster_sizes_UMI(reads, cluster_read_indices, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12, fastq_2way = True):
   # conflates reads that have UMIs that are different by up to 1 mutation
@@ -340,7 +387,7 @@ def calc_cluster_sizes_UMI(reads, cluster_read_indices, UMI_f_start = 0, UMI_f_l
   return cluster_sizes_UMI
 
 
-def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = True, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, sample_id = None, pbar = None):
+def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = True, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, sample_id = None, verbose = False):
 
   # Steps:
   # For each cluster:
@@ -352,17 +399,17 @@ def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = Tr
   #      - the base identity counts at each nt position
   #    d) Stop processing reads early if more than <max_reconstruction_depth> sequences have aligned successfully
   #  2) Perform a majority-vote consensus base at each nucleotide location
-  #    - the votes between ATCG and no base are compared; if the "no base" wins out, the sequence
-  #      is assumed to end earlier than the longest read used in the alignment
+  #    - If any base appeared a majority of the time in each location, then it is selected.
+  #      Otherwise, N is used to indicate low confidence in the base at that location.
 
   reconstruction_depths = []
   base_identity_counts_all = []
   consensus_sequences = []
-  for read_idxs in cluster_read_indices:
+  for read_idxs in tqdm.tqdm(cluster_read_indices, desc='Reconstructing cluster sequences', disable=not verbose):
 
     reconstruction_depth = 0
     base_identity_counts = []
-    for read_idx in read_idxs:
+    for read_idx in tqdm.tqdm(read_idxs, disable=not verbose, leave=False):
 #      _, read_seq = reads[read_idx]
      
       if fastq_2way:
@@ -384,6 +431,11 @@ def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = Tr
           elif nt == 'T':  t+=1
           elif nt == 'C':  c+=1
           elif nt == 'G':  g+=1
+          else:
+            a+=.25
+            t+=.25
+            c+=.25
+            g+=.25
           base_identity_counts[i] = (a,t,c,g)
 
       if reconstruction_depth >= max_reconstruction_depth:
@@ -391,21 +443,17 @@ def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = Tr
 
     consensus_sequence = ''
     for counts in base_identity_counts:
-      no_base = reconstruction_depth - sum(counts)
       max_nt = max(counts)
-
-      if no_base > max_nt:  break
-      
-      if counts.count(max_nt) > 1:
+      if max_nt > reconstruction_depth/2:
+        consensus_sequence += 'ATCG'[counts.index(max_nt)]
+      elif sum(counts) >= reconstruction_depth/2:  # check that a majority of strands were this long
         consensus_sequence += 'N'
       else:
-        consensus_sequence += 'ATCG'[counts.index(max_nt)]
+        break
 
     reconstruction_depths.append(reconstruction_depth)
     base_identity_counts_all.append(base_identity_counts)
     consensus_sequences.append(consensus_sequence)
-
-  print("{}: Sequence reconstruction complete.".format(sample_id))
 
   return consensus_sequences, base_identity_counts_all, reconstruction_depths
 
