@@ -14,9 +14,6 @@ import matplotlib.pyplot as plt
 import utils
 
 def analyze_fastq(path_forward, path_reverse, path_templates, output_prefix, max_reads = None, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, template_hash_f_start = 23, template_hash_r_start = 24, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12, max_hash_defect = 5, min_cluster_abundance = 2e-4, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, selfalign = True, align_left_marker = None, align_left_position = None, align_right_marker = None, align_right_position = None, sample_id = None, pbar = None):
-  # Same as analyze_fastq() but delays self-alignment of the forward and reverse reads until the sequence
-  # reconstruction phase. Also does not attempt to align to sequence markers (e.g. master primer sequences).
-
   # Load sequencing data
   reads_raw = utils.import_fastq_2way(path_forward, path_reverse, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = None)
   reads = reads_raw
