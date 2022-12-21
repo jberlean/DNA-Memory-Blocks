@@ -4,7 +4,8 @@ import random
 import itertools as it
 import copy
 
-import Levenshtein, Bio.Align
+import Bio.SeqRecord, Bio.Seq, Bio.SeqIO, Bio.Align.Applications, Bio.Align.AlignInfo
+import Levenshtein
 import tqdm
 import matplotlib
 #matplotlib.use('Agg')
@@ -92,17 +93,12 @@ def import_fastq_2way(path_f, path_r, max_reads = None, sample_id = None, max_se
   
   # Combine forward and reverse reads into the same list
   reads_all = []
-#  seqs_f_np = np.zeros((len(reads_forward), READ_LENGTH), dtype=np.int)
-#  seqs_r_c_np = np.zeros((len(reads_reverse), READ_LENGTH), dtype=np.int)
-  for i, ((n1, s1), (n2, s2)) in enumerate(zip(reads_forward, reads_reverse)):
+  for i, ((n1, s1), (n2, s2)) in enumerate(zip(tqdm.tqdm(reads_forward, desc='Checking 2-way FASTQ reads...', disable=not verbose, leave=False), reads_reverse)):
     if n1 != n2:
       print("\nWarning: Inconsistent forward/reverse read {} in {} and {}".format(i, path_f, path_r))
       continue
 
     reads_all.append((n1, (s1, s2)))
-#    seqs_f_np[i,:] = [ord(c) for c in s1]
-#    seqs_r_c_np[i,:] = [ord(c) for c in utils.sequence_complement(s2)]
-
 
   return reads_all
 
@@ -201,7 +197,6 @@ def fastq_align_to_marker(read, marker, position, side = 'left', acc_cutoff = .7
   (align_idx_start, align_idx_end), align_score = align_sequences_levenshtein(marker, s)
   if align_score >= len(marker)*acc_cutoff:
     if side == 'left':
-#      return fastq_offset(read, position - align_idx_start, side = side)
       return fastq_offset(read, position + len(marker) - align_idx_end, side = side)
     elif side == 'right':
       return fastq_offset(read, (len(s) - align_idx_start) - position, side = side)
@@ -218,12 +213,10 @@ def fastq_orient(read, orient_markers, acc_cutoff = .75):
   n,s = read
   for orient in orient_markers:
     (align_idx_start, align_idx_end), align_score = align_sequences_levenshtein(orient, s)
-    print(orient, align_idx_start, align_score)
     if align_score >= len(orient)*acc_cutoff:
       return (n,s)
     
     (r_align_idx_start, r_align_idx_end), r_align_score = align_sequences_levenshtein(sequence_complement(orient), s)
-    print('*',orient, r_align_idx_start, r_align_score)
     if align_score >= len(orient)*acc_cutoff:
       return (n+'_C',sequence_complement(s))
 
@@ -236,52 +229,21 @@ def sequence_complement(seq, memo = {}):
     
   return memo[seq]
  
-#def align_sequences(sequence, template):
-#  # Returns the optimal sequence alignment position assuming no deletions
-#  # The best alignment is the one with the lowest hamming distance
-#  seq_len = len(sequence)
-#
-#  best_pos = None
-#  best_score = -1
-#  for i in range(len(sequence)):
-#    sequence_sub = sequence[i:]
-#    template_sub = template[:seq_len-i]
-#    score = sum(a==b for a,b in zip(sequence_sub,template_sub))
-#    if score >= best_score:
-#      best_pos = -i
-#      best_score = score
-#  for i in range(len(template)):
-#    template_sub = template[i:i+seq_len]
-#    sequence_sub = sequence[-len(template_sub):]  # this is wrong -- should be  sequence_sub = sequence[:len(template_sub)]
-#    score = sum(a==b for a,b in zip(sequence_sub,template_sub))
-##    print i, score, best_pos, best_score
-##    print template_sub
-##    print sequence
-#    if score >= best_score:
-#      best_pos = i
-#      best_score = score
-##  print best_pos, best_score
-#  return best_pos, best_score
-
 def align_sequences(template, sequence):
   return align_sequences_levenshtein(template, sequence)
-#  return align_sequences_hamming(template, sequence)
 
 def align_sequences_levenshtein(template, sequence):
   # The best position is given by levenshtein distance, but without penalizing extra nucleotides in the sequence
   seq_len = len(sequence)
   tpt_len = len(template)
 
-  aligner=Bio.Align.PairwiseAligner(mode='global', match_score=0, mismatch_score=-1, open_gap_score=-1, extend_gap_score=-1, target_end_gap_score=-1, query_end_gap_score=0)
+  aligner=Bio.Align.PairwiseAligner(mode='global', match_score=0, mismatch_score=-1, open_gap_score=-1, extend_gap_score=-1, target_end_gap_score=0, query_end_gap_score=-1)
 
-  alignments = aligner.align(sequence, template)
+  alignments = aligner.align(template, sequence)
   alignment = alignments[0]
-  alignment_seq_blocks = alignment.aligned[0]
-  alignment_tpt_blocks = alignment.aligned[1]
+  alignment_seq_blocks = alignment.aligned[1]
   min_seq_idx = min([blk[0] for blk in alignment_seq_blocks])
   max_seq_idx = max([blk[1] for blk in alignment_seq_blocks])
-#  min_tpt_idx = min([blk[0] for blk in alignment_tpt_blocks])
-#  pos = min_seq_idx if min_seq_idx > 0 else -min_tpt_idx
   return (min_seq_idx, max_seq_idx), tpt_len + alignment.score
   
 
@@ -303,14 +265,90 @@ def align_sequences_hamming(template, sequence):
     template_sub = template[i:i+seq_len]
     sequence_sub = sequence[:len(template_sub)]
     score = sum(a==b for a,b in zip(sequence_sub,template_sub))
-#    print i, score, best_pos, best_score
-#    print template_sub
-#    print sequence
     if score >= best_score:
       best_pos = -i
       best_score = score
-#  print best_pos, best_score
   return (best_pos, best_pos + len(template)), best_score
+
+def consensus_sequence(sequences, method = 'Levenshtein-median'):
+  if method = 'naive':
+    return consensus_sequence_naive(sequences)
+  elif reconstruction_method = 'ClustalOmega':
+    return consensus_sequence_ClustalOmega(sequences)
+  else:
+    return consensus_sequence_Levenshtein_median(sequences)
+
+def consensus_sequence_naive(sequences):
+  max_seq_len = max([len(seq) for seq in sequences])
+
+  base_identity_counts = np.zeros((max_seq_len, 4))
+
+  for seq in sequences:
+    for i,nt in enumerate(seq):
+      if nt in 'ATCG':  
+        base_identity_counts[i, 'ATCG'.index(nt)] += 1
+      else:
+        base_identity_counts[i, :] += .25
+
+    consensus_sequence = ''
+    max_nts = np.argmax(base_identity_counts, axis=1)
+    nt_cts = np.sum(base_identity_counts, axis=1)
+    for nt_idx, max_nt in enumerate(max_nts):
+      if base_identity_counts[nt_idx,max_nt] > len(reads)/2:
+        consensus_sequence += 'ATCG'[max_nt]
+      elif nt_cts[nt_idx] >= len(reads)/2:  # check that a majority of strands were this long
+        consensus_sequence += 'N'
+      else:
+        break
+
+  return consensus_sequence, base_identity_counts
+
+def consensus_sequence_ClustalOmega(sequences):
+  # Escape clause if there's one or fewer reads
+  if len(sequences) == 1:
+    return sequences[0], None
+  elif len(sequences) == 0:
+    return None, None
+
+  # Initialize temporary files for use with Clustal Omega
+  infile, inpath = tempfile.mkstemp(suffix='.fasta', text=False)
+  outfile, outpath = tempfile.mkstemp(suffix='.fasta', text=False)
+  os.close(infile)
+  os.close(outfile)
+
+  # Export to a .fasta file (required input format for Clustal Omega)
+  reads = [(f'read_{i}', seq) for i,seq in enumerate(sequences)]
+  utils.export_fasta(inpath, reads, verbose=verbose)
+
+  # Run ClustalOmega
+  clustalomega_cline = Bio.Align.Applications.ClustalOmegaCommandline(infile = inpath, outfile = outpath, auto=True, force=True)
+  stdout, stderr = clustalomega_cline()
+
+  # Parse output
+  # The most natural way is with Bio.AlignIO but I can't import this bc we are missing sqlite3
+  # So we have to make the MultipleSeqAlignment object manually
+  alignment_seqs = utils.import_fasta(outpath, verbose=verbose)
+  alignment_seqs_Bio = [Bio.SeqRecord.SeqRecord(Bio.Seq.Seq(seq), id=name) for name,seq in alignment_seqs]
+  alignment = Bio.Align.MultipleSeqAlignment(alignment_seqs_Bio)
+
+  # Cleanup temporary files
+  os.unlink(inpath)
+  os.unlink(outpath)
+
+  # Calculate consensus sequence using the "dumb_consensus()" method
+  align_summary = Bio.Align.AlignInfo.SummaryInfo(alignment)
+  consensus = align_summary.dumb_consensus(threshold=.5, ambiguous='N')
+  pssm = align_summary.pos_specific_score_matrix(consensus)
+
+  return consensus, pssm
+
+def consensus_sequence_Levenshtein_median(sequences):
+  if len(sequences) > 1:
+    return Levenshtein.median(sequences)
+  elif len(sequences) == 1:
+    return sequences[0]
+  else:  # sequences == []
+    return None
 
 def hamming_distance(seq1, seq2):
   return Levenshtein.hamming(seq1, seq2)

@@ -11,10 +11,6 @@ import matplotlib
 #matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-import Bio.SeqRecord, Bio.Seq, Bio.SeqIO, Bio.Align.Applications, Bio.Align.AlignInfo
-import Levenshtein
-
-
 import utils
 
 def analyze_fastq(path_forward, path_reverse = None, path_templates = 'templates.fasta', output_prefix = 'output', fastq_2way = True, max_reads = None, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, template_hash_f_start = 23, template_hash_r_start = 24, UMI_f_start = 0, UMI_f_length = 12, UMI_r_start = 0, UMI_r_length = 12, max_hash_defect = 5, min_cluster_abundance = 2e-4, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, reconstruction_method = 'Levenshtein-median', selfalign = True, align_left_marker = None, align_left_position = None, align_right_marker = None, align_right_position = None, mask=None, sample_id = None, full_output = False, verbose = False):
@@ -99,6 +95,7 @@ def analyze_fastq(path_forward, path_reverse = None, path_templates = 'templates
       fastq_2way = fastq_2way,
       max_hash_defect = max_hash_defect,
       max_reconstruction_depth = max_reconstruction_depth,
+      reconstruction_method = reconstruction_method,
       min_cluster_size = min_cluster_size,
       sample_id = sample_id, 
       verbose = True,
@@ -114,19 +111,14 @@ def analyze_fastq(path_forward, path_reverse = None, path_templates = 'templates
   )
 
   # Attempt sequence reconstruction of each cluster
-  if reconstruction_method == 'basic':
-    rec_func = cluster_sequence_reconstruction
-  elif reconstruction_method == 'clustal-omega':
-    rec_func = cluster_sequence_reconstruction_ClustalOmega
-  else:
-    rec_func = cluster_sequence_reconstruction_Levenshteinmedian
-  reconstructions, base_identity_counts, reconstruction_depths = rec_func(
+  reconstructions, base_identity_counts, reconstruction_depths = cluster_sequence_reconstruction(
       reads,
       cluster_reads,
       fastq_2way = fastq_2way,
       mask = mask,
       sequencing_accuracy = sequencing_accuracy, 
       max_reconstruction_depth = max_reconstruction_depth,
+      reconstruction_method = reconstruction_method,
       sample_id = sample_id,
       verbose = True
   )
@@ -217,7 +209,7 @@ def _call_func_starstarargs(args):
   func, kwargs = args
   return func(**kwargs)
 
-def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, fastq_2way = True, max_hash_defect = 5, max_reconstruction_depth = 1000, min_cluster_size = 3, cluster_refresh_interval = 2500, sample_id = None, verbose = False):
+def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_start = 36, hash_r_length = 24, fastq_2way = True, max_hash_defect = 5, max_reconstruction_depth = 1000, reconstruction_method = 'Levenshtein-median', min_cluster_size = 3, cluster_refresh_interval = 2500, sample_id = None, verbose = False):
   # Steps:
   # For each forward/reverse read, do the following:
   #  1) Identify the forward hash, which is located at forward_read[23:47]
@@ -275,19 +267,13 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
 
     # remake/update cluster info
     cluster_reads_new = [[] for _ in range(num_new_clusters)]
-#    cluster_hash_base_counts_new = [[[0,0,0,0] for __ in range(hash_length)] for _ in range(num_new_clusters)]
     for c_idx in new_clusters:
       c_idx_new = new_clusters[c_idx]
       cluster_reads_new[c_idx_new].extend(cluster_reads[c_idx])
-#      for i,(a,t,c,g) in enumerate(cluster_hash_base_counts[c_idx]):
-#        atot, ttot, ctot, gtot = cluster_hash_base_counts_new[c_idx_new][i]
-#        cluster_hash_base_counts_new[c_idx_new][i] = [a+atot, t+ttot, c+ctot, g+gtot]
     cluster_reads_new = [list(set(r)) for r in cluster_reads_new]
-#    cluster_hash_base_counts = cluster_hash_base_counts_new
 
-#    cluster_sequences = [''.join(['ATCG'[counts.index(max(counts))] for counts in base_counts]) for base_counts in cluster_hash_base_counts]
     cluster_hashes_new = [[read_hashes[idx] for idx in c_reads] for c_reads in cluster_reads_new]
-    cluster_sequences_new = [Levenshtein.median(c_hashes[:max_reconstruction_depth]) for c_hashes in cluster_hashes_new]
+    cluster_sequences_new = [utils.consensus_sequence(c_hashes[:max_reconstruction_depth], method=reconstruction_method) for c_hashes in cluster_hashes_new]
 
     hash_subseqs_to_cluster = {}
     for c_idx,h in enumerate(cluster_sequences_new):
@@ -299,12 +285,10 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
 
     return num_new_clusters, cluster_sequences_new, cluster_reads_new, cluster_hashes_new, hash_subseqs_to_cluster
 
-
   num_clusters = 0
   hash_subseqs_to_cluster = {}
   cluster_hashes = []
   cluster_reads = []
-#  cluster_hash_base_counts = []
   cluster_sequences = []
 
   hash_length = hash_f_length + hash_r_length
@@ -315,7 +299,6 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
   
   for read_idx, hash_full in enumerate(tqdm.tqdm(read_hashes, desc='Clustering reads', disable=not verbose)):
     # extract hash; hash_f/hash_r starts at 23/24, but UMIs add 12nts to each end
-#    hash_full = read_to_hash(read_seq, hash_f_start = hash_f_start, hash_f_length = hash_f_length, hash_r_start = hash_r_start, hash_r_length = hash_r_length, fastq_2way = fastq_2way)
     if len(hash_full) != hash_length:  continue
 
     # check if we've observed this hash before, or one with up to <max_hash_defect> mutations
@@ -337,7 +320,6 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
       clusters = set([num_clusters])
       cluster_hashes.append([])
       cluster_reads.append([])
-#      cluster_hash_base_counts.append([[0,0,0,0] for _ in range(hash_length)])
       cluster_sequences.append('N'*hash_length)
       num_clusters += 1
 
@@ -350,26 +332,15 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
     for idx in clusters:
       cluster_hashes[idx].append(hash_full)
       cluster_reads[idx].append(read_idx)
-#      for i,nt in enumerate(hash_full):
-#        if nt in 'ATCG':
-#          cluster_hash_base_counts[idx][i]['ATCG'.index(nt)] += 1
-#      if len(cluster_reads) <= 2:
-#        cluster_sequences[idx] = ''.join(['ATCG'[counts.index(max(counts))] for counts in cluster_hash_base_counts[idx]])
-#      else:
-      cluster_sequences[idx] = Levenshtein.median(cluster_hashes[idx][:max_reconstruction_depth])
+      cluster_sequences[idx] = utils.consensus_sequence(cluster_hashes[idx][:max_reconstruction_depth], method=reconstruction_method)
 
     # If we've reached the cluster refresh interval, merge similar clusters
     if read_idx % cluster_refresh_interval == cluster_refresh_interval-1 or read_idx == len(reads)-1:
       num_clusters, cluster_sequences, cluster_reads, cluster_hashes, hash_subseqs_to_cluster = _merge_similar_clusters(num_clusters, cluster_sequences, cluster_reads)
 
-#  # calculate consensus hashes for each cluster
-#  cluster_hash_seqs = []
-#  for cluster_idx in range(len(cluster_reads)):
-#    cluster_hash_seqs.append(''.join(['ATCG'[counts.index(max(counts))] for counts in cluster_hash_base_counts[cluster_idx]]))
-
   # Perform phase 2 of the clustering, which is an iterative process of
   #   1) Reassign reads to their closest cluster, if it is within the max_hash_defect
-  #   2) Recompute cluster hash sequence with Levenshtein.median
+  #   2) Recompute cluster hash sequence with the specified reconstruction method
   #   3) Merge clusters within the max_hash_defect
   # This is repeated until no clusters are merged in the final step, for a max of 5 times
 
@@ -394,7 +365,7 @@ def cluster_reads_by_hash(reads, hash_f_start = 35, hash_f_length = 24, hash_r_s
   
     # recompute cluster hashes based on new read assignments
     cluster_hashes = [[read_hashes[idx] for idx in c_reads] for c_reads in cluster_reads]
-    cluster_sequences = [Levenshtein.median(c_hashes[:max_reconstruction_depth]) if len(c_hashes)>0 else '' for c_hashes in cluster_hashes]
+    cluster_sequences = [utils.consensus_sequence(c_hashes[:max_reconstruction_depth], method=reconstruction_method) if len(c_hashes)>0 else '' for c_hashes in cluster_hashes]
   
     # cluster merging
     num_clusters_old = num_clusters
@@ -465,97 +436,16 @@ def calc_cluster_sizes_UMI(reads, cluster_read_indices, UMI_f_start = 0, UMI_f_l
 
   return cluster_sizes_UMI
 
-
-def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = True, mask = None, sequencing_accuracy = 0.75, max_reconstruction_depth = 100, sample_id = None, verbose = False):
-
-  # Steps:
-  # For each cluster:
-  #  1) For each read in this cluster
-  #    a) Pull out the corresponding forward and reverse sequences
-  #    b) Attempt to align the forward and reverse sequences
-  #    c) If sequence alignment is successful, update:
-  #      - the number of aligned sequences used in the reconstruction
-  #      - the base identity counts at each nt position
-  #    d) Stop processing reads early if more than <max_reconstruction_depth> sequences have aligned successfully
-  #  2) Perform a majority-vote consensus base at each nucleotide location
-  #    - If any base appeared a majority of the time in each location, then it is selected.
-  #      Otherwise, N is used to indicate low confidence in the base at that location.
-
-  reconstruction_depths = []
-  base_identity_counts_all = []
-  consensus_sequences = []
-  for read_idxs in tqdm.tqdm(cluster_read_indices, desc='Reconstructing cluster sequences', disable=not verbose):
-
-    reconstruction_depth = 0
-    base_identity_counts = []
-    for read_idx in tqdm.tqdm(read_idxs, disable=not verbose, leave=False):
-#      _, read_seq = reads[read_idx]
-     
-      if fastq_2way:
-        # attempt to align the forward and reverse reads
-        # this is done by taking the last 20nts of the reverse read and aligning it with the forward read
-        _, seq_full = utils.fastq_2way_selfalign(reads[read_idx], acc_cutoff = sequencing_accuracy, align_s2_length = 20, min_alignment_overlap = 10)
-      else:
-        _, seq_full = reads[read_idx]
-
-      if seq_full is not None:
-        if mask is not None:
-          seq_full = ''.join(nt if mask_bit else 'N' for nt, mask_bit in zip(seq_full, mask))
-
-        # alignment successful
-        reconstruction_depth += 1
-
-        if len(base_identity_counts) < len(seq_full):
-          base_identity_counts += [(0,0,0,0)]*(len(seq_full) - len(base_identity_counts))
-        for i,nt in enumerate(seq_full):
-          a,t,c,g = base_identity_counts[i]
-          if   nt=='A':  a+=1
-          elif nt == 'T':  t+=1
-          elif nt == 'C':  c+=1
-          elif nt == 'G':  g+=1
-          else:
-            a+=.25
-            t+=.25
-            c+=.25
-            g+=.25
-          base_identity_counts[i] = (a,t,c,g)
-
-      if reconstruction_depth >= max_reconstruction_depth:
-        break
-
-    consensus_sequence = ''
-    for counts in base_identity_counts:
-      max_nt = max(counts)
-      if max_nt > reconstruction_depth/2:
-        consensus_sequence += 'ATCG'[counts.index(max_nt)]
-      elif sum(counts) >= reconstruction_depth/2:  # check that a majority of strands were this long
-        consensus_sequence += 'N'
-      else:
-        break
-
-    reconstruction_depths.append(reconstruction_depth)
-    base_identity_counts_all.append(base_identity_counts)
-    consensus_sequences.append(consensus_sequence)
-
-  return consensus_sequences, base_identity_counts_all, reconstruction_depths
-
-def cluster_sequence_reconstruction_ClustalOmega(reads, cluster_read_indices, fastq_2way = True, sequencing_accuracy = 0.75, mask = None, max_reconstruction_depth = 100, sample_id = None, verbose = False):
+def cluster_sequence_reconstruction(reads, cluster_read_indices, fastq_2way = True, sequencing_accuracy = 0.75, mask = None, max_reconstruction_depth = 100, reconstruction_method = 'Levenshtein-median', sample_id = None, verbose = False):
   # For each cluster:
   #   Output the reads in the cluster to a temporary .fasta file
   #     If reads are 2-way, first do a self-alignment
   #     If there are more than <max_reconstruction_depth> reads, use the first <max_reconstruction_depth> reads.
-  #   Run ClustalOmega on these reads. Output is in another .fasta file (I think)
-  #   Use Bio.AlignIO functions to get a "dumb" consensus sequence based on the alignemnt. Use a threshold of 0.5
-
+  #   Run the specified reconstruction method
   reconstruction_depths = []
   base_identity_counts_all = []
   consensus_sequences = []
   for read_idxs in tqdm.tqdm(cluster_read_indices, desc='Reconstructing cluster sequences', disable=not verbose):
-
-
-    reconstruction_depth = 0
-    base_identity_counts = []
-
     # Perform self-alignment, if necessary. Then pare down to the first <max_reconstruction_depth> reads
     if fastq_2way:
       cluster_reads = [utils.fastq_2way_selfalign(reads[idx], acc_cutoff = sequencing_accuracy, align_s2_length = 20, min_alignment_overlap = 10) for idx in read_idxs]
@@ -565,90 +455,15 @@ def cluster_sequence_reconstruction_ClustalOmega(reads, cluster_read_indices, fa
 
     if mask is not None:
       cluster_reads = [(name, ''.join(nt if mask_bit else 'N' for nt, mask_bit in zip(seq, mask))) for name,seq in cluster_reads]
+    _, sequences = zip(*cluster_reads)
 
-    # Escape clause if there's one or fewer reads
-    if len(cluster_reads) == 1:
-      consensus_sequences.append(cluster_reads[0][1])
-      base_identity_counts_all.append(None)
-      reconstruction_depths.append(1)
-      continue
-    elif len(cluster_reads) == 0:
-      consensus_sequences.append(None)
-      base_identity_counts_all.append(None)
-      reconstruction_depths.append(0)
-      continue
+    consensus, base_identity_counts = utils.consensus_sequence(sequences, method=reconstruction_method)
 
-    # Initialize temporary files for use with Clustal Omega
-    infile, inpath = tempfile.mkstemp(suffix='.fasta', text=False)
-    outfile, outpath = tempfile.mkstemp(suffix='.fasta', text=False)
-    os.close(infile)
-    os.close(outfile)
-
-    # Export to a .fasta file (required input format for Clustal Omega)
-    utils.export_fasta(inpath, cluster_reads, verbose=verbose)
-
-    # Run ClustalOmega
-    clustalomega_cline = Bio.Align.Applications.ClustalOmegaCommandline(infile = inpath, outfile = outpath, auto=True, force=True)
-    stdout, stderr = clustalomega_cline()
-
-    # Parse output
-    # The most natural way is with Bio.AlignIO but I can't import this bc we are missing sqlite3
-    # So we have to make the MultipleSeqAlignment object manually
-    alignment_seqs = utils.import_fasta(outpath, verbose=verbose)
-    alignment_seqs_Bio = [Bio.SeqRecord.SeqRecord(Bio.Seq.Seq(seq), id=name) for name,seq in alignment_seqs]
-    alignment = Bio.Align.MultipleSeqAlignment(alignment_seqs_Bio)
-
-    # Cleanup temporary files
-    os.unlink(inpath)
-    os.unlink(outpath)
-
-    # Calculate consensus sequence using the "dumb_consensus()" method
-    align_summary = Bio.Align.AlignInfo.SummaryInfo(alignment)
-    consensus = align_summary.dumb_consensus(threshold=.5, ambiguous='N')
-    pssm = align_summary.pos_specific_score_matrix(consensus)
-
-    reconstruction_depths.append(len(cluster_reads))
     consensus_sequences.append(consensus)
-    base_identity_counts_all.append(pssm)
+    base_identity_counts_all.append(base_identity_counts)
+    reconstruction_depths.apend(len(cluster_reads))
 
   return consensus_sequences, base_identity_counts_all, reconstruction_depths
-  
-
-def cluster_sequence_reconstruction_Levenshteinmedian(reads, cluster_read_indices, fastq_2way = True, sequencing_accuracy = 0.75, mask = None, max_reconstruction_depth = 100, sample_id = None, verbose = False):
-  # For each cluster, uses the greedy string median function Levenshtein.median() to compute a consensus sequence
-  # The median string is the string with the minimum edit distance to all strings in the set
-
-  reconstruction_depths = []
-  consensus_sequences = []
-  for read_idxs in tqdm.tqdm(cluster_read_indices, desc='Reconstructing cluster sequences', disable=not verbose):
-
-    reconstruction_depth = 0
-
-    # Perform self-alignment, if necessary. Then pare down to the first <max_reconstruction_depth> reads
-    if fastq_2way:
-      cluster_reads = [utils.fastq_2way_selfalign(reads[idx], acc_cutoff = sequencing_accuracy, align_s2_length = 20, min_alignment_overlap = 10) for idx in read_idxs]
-    else:
-      cluster_reads = [reads[idx] for idx in read_idxs]
-    cluster_reads = [read for read in cluster_reads if read[1] is not None][:max_reconstruction_depth]
-
-    if mask is not None:
-      cluster_reads = [(name, ''.join(nt if mask_bit else 'N' for nt, mask_bit in zip(seq, mask))) for name,seq in cluster_reads]
-
-    if len(cluster_reads) > 1:
-      consensus = Levenshtein.median(list(zip(*cluster_reads))[1])
-      consensus_sequences.append(consensus)
-      reconstruction_depths.append(len(cluster_reads))
-    elif len(cluster_reads) == 1:
-      consensus_sequences.append(cluster_reads[0][1])
-      reconstruction_depths.append(1)
-      continue
-    elif len(cluster_reads) == 0:
-      consensus_sequences.append(None)
-      reconstruction_depths.append(0)
-      continue
-
-  return consensus_sequences, None, reconstruction_depths
-  
 
 def assign_clusters_to_templates(cluster_hashes, templates, template_hash_f_start = 23, hash_f_length = 24, template_hash_r_start = 24, hash_r_length = 24, max_hash_defect = 3, sample_id = None, verbose = True):
   # Extract hashes for each template:
