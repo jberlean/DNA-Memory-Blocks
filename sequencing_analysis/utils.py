@@ -4,7 +4,7 @@ import random
 import itertools as it
 import copy
 
-import Levenshtein
+import Levenshtein, Bio.Align
 import tqdm
 import matplotlib
 #matplotlib.use('Agg')
@@ -12,66 +12,62 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 
-def import_fasta(path, pbar = None, sample_id = None):
+def import_fasta(path, sample_id = None, verbose = False):
   file = open(path)
 
   sequences = []
 
-  pbar_desc = 'Loading FASTA: {}'.format(path)
+  pbar_desc = f'Loading FASTA: {path}'
   if sample_id is not None:
-    pbar_desc = 'SAMPLE {}: '.format(sample_id) + pbar_desc
-  if pbar is None:
-    pass
-  else:
-    pbar.set_description(pbar_desc)
-    pbar.unit = ' seqs'
-#    pbar.dynamic_ncols=True
-    pbar.reset()
-    close_pbar = False
-
-#  print "Loading sequences from {}...\r".format(path), 
+    pbar_desc = f'SAMPLE {sample_id}: {pbar_desc}'
+  pbar = tqdm.tqdm(desc=pbar_desc, unit=' seqs', disable=not verbose, leave=False)
 
   cur_name, cur_sequence = '',''
   for line in file:
     if line[0]=='>':
       if cur_sequence != '':
         sequences.append((cur_name, cur_sequence))
-#        print "Loading sequences from {}: {}\r".format(path, len(sequences)),
-        if pbar is not None:
-          pbar.update(1)
+        pbar.update(1)
       cur_name = line[1:].strip()
       cur_sequence = ''
     else:
       cur_sequence += line.strip()
   sequences.append((cur_name, cur_sequence))
 
-  if pbar is not None and close_pbar:
-    pbar.close()
+  pbar.close()
+  file.close()
 
   return sequences
 
+def export_fasta(path, sequences, sample_id = None, verbose = False):
+  file = open(path, 'w')
 
-def import_fastq(path, max_reads = None, pbar = None, sample_id = None, max_sequence_length = None, sequence_pretruncate = 0):
+  pbar_desc = f'Exporting FASTA: {path}'
+  if sample_id is not None:
+    pbar_desc = f'SAMPLE {sample_id}: {pbar_desc}'
+  pbar = tqdm.tqdm(desc=pbar_desc, unit=' seqs', disable=not verbose, leave=False)
+
+  for name, seq in sequences:
+    file.write(f'>{name}\n')
+    file.write(f'{seq}\n')
+    pbar.update(1)
+
+  pbar.close()
+
+  file.close()
+
+def import_fastq(path, max_reads = None, sample_id = None, max_sequence_length = None, sequence_pretruncate = 0, verbose = False):
   if max_reads is None:  max_reads = float('inf')
 
   file = open(path)
 
   sequences = []
 
-  pbar_desc = 'Loading FASTQ: {}'.format(path)
-  if sample_id is not None:
-    pbar_desc = 'SAMPLE {}: '.format(sample_id) + pbar_desc
-  if pbar is None:
-    pbar = tqdm.tqdm(desc=pbar_desc, unit=' reads', dynamic_ncols = True)
-    close_pbar = True
-    pass
+  if sample_id is None:
+    pbar_desc = f'Loading FASTQ: {path}'
   else:
-    pbar.set_description(pbar_desc)
-    pbar.unit = ' reads'
-#    pbar.dynamic_ncols = True
-    pbar.reset()
-    close_pbar = False
-#  print "Loading sequences from {}...\r".format(path), 
+    pbar_desc = f'SAMPLE {sample_id}: Loading FASTQ: {path}'
+  pbar = tqdm.tqdm(desc=pbar_desc, unit=' reads', dynamic_ncols = True, disable = not verbose)
 
   lines = [file.readline() for _ in range(4)]
   while lines[-1] != '' and len(sequences) < max_reads:
@@ -82,20 +78,17 @@ def import_fastq(path, max_reads = None, pbar = None, sample_id = None, max_sequ
       cur_sequence = cur_sequence[:max_sequence_length]
 
     sequences.append((cur_name, cur_sequence))
-#    print "Loading sequences from {} ({})...\r".format(path, len(sequences)), 
-    if pbar is not None:
-      pbar.update(1)
+    pbar.update(1)
 
     lines = [file.readline() for _ in range(4)]
 
-#  print "Loading sequences from {} ({})... Done!".format(path, len(sequences)) 
-  if pbar is not None and close_pbar:
-    pbar.close()
+  pbar.close()
+
   return sequences
 
-def import_fastq_2way(path_f, path_r, max_reads = None, pbar = None, sample_id = None, max_sequence_length = None, sequence_pretruncate = 0, align = False):
-  reads_forward = import_fastq(path_f, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = max_sequence_length, sequence_pretruncate = sequence_pretruncate)
-  reads_reverse = import_fastq(path_r, max_reads = max_reads, pbar = pbar, sample_id = sample_id, max_sequence_length = max_sequence_length, sequence_pretruncate = sequence_pretruncate)
+def import_fastq_2way(path_f, path_r, max_reads = None, sample_id = None, max_sequence_length = None, sequence_pretruncate = 0, align = False, verbose = False):
+  reads_forward = import_fastq(path_f, max_reads = max_reads, sample_id = sample_id, max_sequence_length = max_sequence_length, sequence_pretruncate = sequence_pretruncate, verbose = verbose)
+  reads_reverse = import_fastq(path_r, max_reads = max_reads, sample_id = sample_id, max_sequence_length = max_sequence_length, sequence_pretruncate = sequence_pretruncate, verbose = verbose)
   
   # Combine forward and reverse reads into the same list
   reads_all = []
@@ -125,22 +118,22 @@ def fastq_2way_selfalign(read, acc_cutoff = .75, align_s1_length = None, align_s
   s1_sub = s1[-align_s1_length:]
   s2_c_sub = sequence_complement(s2[-align_s2_length:])
 
-  align_pos, align_score = align_sequences(s2_c_sub, s1)
+  (align_idx_start, align_idx_end), align_score = align_sequences_hamming(s2_c_sub, s1)
   
-  overlap_len = min(align_s1_length-max(align_pos,0), align_s2_length-max(-align_pos,0))
+  overlap_len = min(align_s1_length-max(align_idx_start,0), align_s2_length-max(-align_idx_start,0))
   if overlap_len >= min_alignment_overlap and align_score >= overlap_len*acc_cutoff:
     s_align = ''
 
-    if align_pos > 0:
-      s_align += s1[:align_pos]
+    if align_idx_start > 0:
+      s_align += s1[:align_idx_start]
 
     s_align += ''.join(
         nt1 if nt1==nt2 or nt2=='N' else (nt2 if nt1=='N' else 'N')
-        for nt1,nt2 in zip(s1[max(align_pos,0):], s2_c[max(-align_pos,0):])
+        for nt1,nt2 in zip(s1[max(align_idx_start,0):], s2_c[max(-align_idx_start,0):])
     )
 
-    if align_pos > 0:
-      s_align += s2_c[-align_pos:]
+    if align_idx_start > 0:
+      s_align += s2_c[-align_idx_start:]
       
     return (n, s_align)
   else:
@@ -205,12 +198,13 @@ def fastq_align_to_marker(read, marker, position, side = 'left', acc_cutoff = .7
 
   n,s = read
   
-  align_pos, align_score = align_sequences(marker, s)
+  (align_idx_start, align_idx_end), align_score = align_sequences_levenshtein(marker, s)
   if align_score >= len(marker)*acc_cutoff:
     if side == 'left':
-      return fastq_offset(read, position - align_pos, side = side)
+#      return fastq_offset(read, position - align_idx_start, side = side)
+      return fastq_offset(read, position + len(marker) - align_idx_end, side = side)
     elif side == 'right':
-      return fastq_offset(read, (len(s) - align_pos) - position, side = side)
+      return fastq_offset(read, (len(s) - align_idx_start) - position, side = side)
   elif orient:
     n_align, s_align = fastq_align_to_marker((n+'_C', sequence_complement(s)), marker, position, side = side, acc_cutoff=acc_cutoff, orient=False)
     if s_align is not None:
@@ -223,13 +217,13 @@ def fastq_align_to_marker(read, marker, position, side = 'left', acc_cutoff = .7
 def fastq_orient(read, orient_markers, acc_cutoff = .75):
   n,s = read
   for orient in orient_markers:
-    align_pos, align_score = align_sequences(orient, s)
-    print(orient, align_pos, align_score)
+    (align_idx_start, align_idx_end), align_score = align_sequences_levenshtein(orient, s)
+    print(orient, align_idx_start, align_score)
     if align_score >= len(orient)*acc_cutoff:
       return (n,s)
     
-    r_align_pos, r_align_score = align_sequences(sequence_complement(orient), s)
-    print('*',orient, r_align_pos, r_align_score)
+    (r_align_idx_start, r_align_idx_end), r_align_score = align_sequences_levenshtein(sequence_complement(orient), s)
+    print('*',orient, r_align_idx_start, r_align_score)
     if align_score >= len(orient)*acc_cutoff:
       return (n+'_C',sequence_complement(s))
 
@@ -269,7 +263,29 @@ def sequence_complement(seq, memo = {}):
 ##  print best_pos, best_score
 #  return best_pos, best_score
 
-def align_sequences(sequence, template):
+def align_sequences(template, sequence):
+  return align_sequences_levenshtein(template, sequence)
+#  return align_sequences_hamming(template, sequence)
+
+def align_sequences_levenshtein(template, sequence):
+  # The best position is given by levenshtein distance, but without penalizing extra nucleotides in the sequence
+  seq_len = len(sequence)
+  tpt_len = len(template)
+
+  aligner=Bio.Align.PairwiseAligner(mode='global', match_score=0, mismatch_score=-1, open_gap_score=-1, extend_gap_score=-1, target_end_gap_score=-1, query_end_gap_score=0)
+
+  alignments = aligner.align(sequence, template)
+  alignment = alignments[0]
+  alignment_seq_blocks = alignment.aligned[0]
+  alignment_tpt_blocks = alignment.aligned[1]
+  min_seq_idx = min([blk[0] for blk in alignment_seq_blocks])
+  max_seq_idx = max([blk[1] for blk in alignment_seq_blocks])
+#  min_tpt_idx = min([blk[0] for blk in alignment_tpt_blocks])
+#  pos = min_seq_idx if min_seq_idx > 0 else -min_tpt_idx
+  return (min_seq_idx, max_seq_idx), tpt_len + alignment.score
+  
+
+def align_sequences_hamming(template, sequence):
   # Returns the optimal sequence alignment position assuming no deletions
   # The best alignment is the one with the lowest hamming distance
   seq_len = len(sequence)
@@ -281,7 +297,7 @@ def align_sequences(sequence, template):
     template_sub = template[:seq_len-i]
     score = sum(a==b for a,b in zip(sequence_sub,template_sub))
     if score >= best_score:
-      best_pos = -i
+      best_pos = i
       best_score = score
   for i in range(len(template)):
     template_sub = template[i:i+seq_len]
@@ -291,10 +307,10 @@ def align_sequences(sequence, template):
 #    print template_sub
 #    print sequence
     if score >= best_score:
-      best_pos = i
+      best_pos = -i
       best_score = score
 #  print best_pos, best_score
-  return best_pos, best_score
+  return (best_pos, best_pos + len(template)), best_score
 
 def hamming_distance(seq1, seq2):
   return Levenshtein.hamming(seq1, seq2)
